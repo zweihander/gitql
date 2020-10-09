@@ -1,17 +1,19 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 
 	"github.com/chzyer/readline"
-	"github.com/cloudson/gitql/parser"
-	"github.com/cloudson/gitql/runtime"
-	"github.com/cloudson/gitql/semantical"
+	"github.com/cloudson/gitql/gitql"
+	"github.com/go-git/go-git/v5"
+	"github.com/olekukonko/tablewriter"
 	"github.com/urfave/cli/v2"
 )
 
+// Version of Gitql
 const Version = "Gitql 2.1.0"
 
 func main() {
@@ -92,11 +94,29 @@ func main() {
 				return cli.ShowAppHelp(c)
 			}
 
-			if interactive {
-				return runPrompt(path, format)
+			repo, err := git.PlainOpen(path)
+			if err != nil {
+				return err
 			}
 
-			return runQuery(c.Args().First(), path, format)
+			gql := gitql.New(repo)
+
+			if interactive {
+				return runPrompt(gql, format == "json")
+			}
+
+			res, err := gql.ExecuteQuery(c.Args().First())
+			if err != nil {
+				return err
+			}
+
+			if format == "json" {
+				printJSON(res)
+				return nil
+			}
+
+			printTable(res)
+			return nil
 		},
 	}
 
@@ -109,7 +129,7 @@ func main() {
 func showTablesCmd(c *cli.Context) error {
 	fmt.Print("Tables: \n\n")
 
-	for tableName, fields := range runtime.PossibleTables() {
+	for tableName, fields := range gitql.Tables() {
 		fmt.Printf("%s\n\t", tableName)
 		for i, field := range fields {
 			comma := "."
@@ -123,7 +143,7 @@ func showTablesCmd(c *cli.Context) error {
 	return nil
 }
 
-func runPrompt(folder, typeFormat string) error {
+func runPrompt(gql *gitql.Gitql, jsonify bool) error {
 	term, err := readline.NewEx(&readline.Config{
 		Prompt:       "gitql> ",
 		AutoComplete: readline.SegmentFunc(suggestQuery),
@@ -150,26 +170,38 @@ func runPrompt(folder, typeFormat string) error {
 			break
 		}
 
-		if err := runQuery(query, folder, typeFormat); err != nil {
+		res, err := gql.ExecuteQuery(query)
+		if err != nil {
 			fmt.Println("Error: " + err.Error())
 			continue
 		}
+
+		if jsonify {
+			printJSON(res)
+			continue
+		}
+
+		printTable(res)
 	}
 
 	return nil
 }
 
-func runQuery(query, folder, typeFormat string) error {
-	parser.New(query)
-	ast, err := parser.AST()
-	if err != nil {
-		return err
+func printTable(result *gitql.Table) {
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetAutoFormatHeaders(false)
+	table.SetHeader(result.Columns)
+	table.SetRowLine(true)
+	for _, row := range result.Rows {
+		rowData := make([]string, len(row))
+		for i, rowval := range row {
+			rowData[i] = fmt.Sprintf("%v", rowval)
+		}
+		table.Append(rowData)
 	}
+	table.Render()
+}
 
-	ast.Path = &folder
-	if err := semantical.Analysis(ast); err != nil {
-		return err
-	}
-
-	return runtime.Run(ast, &typeFormat)
+func printJSON(table *gitql.Table) {
+	json.NewEncoder(os.Stdout).Encode(table)
 }
